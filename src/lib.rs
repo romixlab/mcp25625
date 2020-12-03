@@ -556,6 +556,8 @@ impl McpErrorFlags {
     pub fn txwar_is_set(&self) -> bool { self.bits & (1u8 << 2) != 0 }
     pub fn rxwar_is_set(&self) -> bool { self.bits & (1u8 << 1) != 0 }
     pub fn ewarn_is_set(&self) -> bool { self.bits & (1u8 << 0) != 0 }
+    pub fn is_err(&self) -> bool { self.bits != 0 }
+    pub fn is_ok(&self) -> bool { self.bits == 0 }
 }
 
 impl fmt::Debug for McpErrorFlags {
@@ -853,6 +855,10 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
     pub fn interrupt_flags(&mut self) -> McpInterruptFlags {
         let bits = self.ral.read_reg(0b0010_1100);
         McpInterruptFlags { bits }
+    }
+
+    pub fn enable_interrupts(&mut self) {
+        self.ral.write_reg(0x2B, 0xFF);
     }
 
     pub fn reset_interrupt_flags(&mut self, mask: u8) {
