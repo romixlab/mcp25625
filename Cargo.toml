@@ -9,3 +9,4 @@ edition = "2018"
 [dependencies]
 cortex-m = "0.6"
 embedded-hal = "0.2.3"
+vhrdcan = { path = "../vhrdcan" }

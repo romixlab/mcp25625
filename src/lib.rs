@@ -6,6 +6,7 @@ use core::fmt;
 use embedded_hal::blocking::spi::{Write, Transfer};
 use embedded_hal::digital::v2::OutputPin;
 use cortex_m::asm::delay;
+use vhrdcan::{id::{FrameId, StandardId, ExtendedId}, RawFrameRef, RawFrame};
 
 /// Shows that register has `read` method.
 pub trait Readable {}
@@ -478,15 +479,36 @@ pub struct MCP25625<SPI, CS> {
     ral: Mcp25625Ral<SPI, CS>,
 }
 
+/// Config for everything
+///
+/// Filters stuff:
+/// If FiltersConfig::ReceiveAll is passed, RXM=11 mode is set which disables filters.
+/// If only FiltersConfigBUffer0 is passed, filters for Buffer1 is copied from it (Filter0 and Filter1 if not None).
+/// If only one filter is used in FiltersConfigBUffer0 (Filter0), second one will be copied from it (Filter1).
+/// If FiltersConfigBUffer1 is passed with some filters as None, Filter2 and Filter3 (if not None)
+/// will be used to fill the holes.
+///
+/// Time quanta stuff:
+/// Tq/bit = 5-25
+/// Nbt = Tq*(sync_seg=1 + prop_seg + ph_seg1 + ph_seg2)
+/// Nbr = 1/Nbt
 pub struct MCP25625Config {
-    pub brp: u8, // 0-63, Tq = 2*(brp+1) / Fosc
-    // Tq/bit = 5-25
-    // Nbt = Tq*(sync_seg=1 + prop_seg + ph_seg1 + ph_seg2)
-    // Nbr = 1/Nbt
-    pub prop_seg: u8, // 1-8 Tq
-    pub ph_seg1: u8, // 1-8 Tq
-    pub ph_seg2: u8, // 2-8 Tq
-    pub sync_jump_width: u8, // 1-4 Tq
+    /// 0-63, Tq = 2*(brp+1) / Fosc
+    pub brp: u8,
+    /// 1-8 Tq
+    pub prop_seg: u8,
+    /// 1-8 Tq
+    pub ph_seg1: u8,
+    /// 2-8 Tq
+    pub ph_seg2: u8,
+    /// 1-4 Tq
+    pub sync_jump_width: u8,
+    /// If Buffer0 is already full, copy message to Buffer1 instead
+    pub rollover_to_buffer1: bool,
+    /// Enable filters or receive everything
+    pub filters_config: FiltersConfig,
+    /// Switch to this mode after configuration
+    pub operation_mode: McpOperationMode
 }
 
 #[derive(Debug)]
@@ -637,57 +659,7 @@ impl fmt::Debug for McpInterruptFlags {
     }
 }
 
-pub struct CanAddress {
-    pub address: u32,
-    extended: bool
-}
-
-impl CanAddress {
-    pub fn extended(address: u32) -> CanAddress {
-        CanAddress {
-            address: address & (!(0b111u32 << 29)),
-            extended: true
-        }
-    }
-
-    pub fn standard(address: u16) -> CanAddress {
-        CanAddress {
-            address: (address & 0b111_1111_1111u16) as u32,
-            extended: false
-        }
-    }
-
-    pub fn is_extended(&self) -> bool {
-        self.extended
-    }
-}
-
-impl fmt::Debug for CanAddress {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let _ = write!(f, "CanAddress(");
-        if self.is_extended() {
-            let _ = write!(f, "ext:");
-            let mut nibbles = [0u8; 8];
-            let mut addr = self.address;
-            for i in 0..=7usize {
-                nibbles[i] = (addr & 0b1111) as u8;
-                addr = addr >> 4;
-            }
-            for i in (0..=7usize).rev() {
-                match i {
-                    0 => { let _ = write!(f, "{:04b}", nibbles[i]); },
-                    1..=6 => { let _ = write!(f, "{:04b}_", nibbles[i]); },
-                    _ => { let _ = write!(f, "{:01b}_", nibbles[i]); }
-                }
-            }
-        } else {
-            let _ = write!(f, "std:");
-        }
-        write!(f, ")")
-    }
-}
-
-pub struct McpTxBuf {
+struct McpTxBuf {
     pub txb_ctrl: u8,
     pub txb_sidh: u8,
     pub rts_cmd: u8
@@ -709,6 +681,7 @@ pub enum McpAcceptanceFilter {
     RXF5 = 5
 }
 
+#[derive(Copy, Clone)]
 pub enum McpReceiveBuffer {
     Buffer0,
     Buffer1
@@ -717,8 +690,22 @@ pub enum McpReceiveBuffer {
 pub struct McpCanMessage {
     pub len: u8,
     pub data: [u8; 8],
-    pub address: CanAddress,
+    pub address: FrameId,
     pub filter: McpAcceptanceFilter
+}
+
+enum Filter {
+    Filter0 = 0,
+    Filter1 = 1,
+    Filter2 = 2,
+    Filter3 = 3,
+    Filter4 = 4,
+    Filter5 = 5,
+}
+
+enum FilterMask {
+    FilterMaskBuffer0,
+    FilterMaskBuffer1
 }
 
 impl fmt::Debug for McpCanMessage {
@@ -729,6 +716,28 @@ impl fmt::Debug for McpCanMessage {
         }
         write!(f, "]")
     }
+}
+
+#[derive(Eq, PartialEq)]
+pub struct FiltersConfigBuffer0 {
+    pub mask: u32,
+    pub filter0: FrameId,
+    pub filter1: Option<FrameId>
+}
+
+#[derive(Eq, PartialEq)]
+pub struct FiltersConfigBuffer1 {
+    pub mask: u32,
+    pub filter2: FrameId,
+    pub filter3: Option<FrameId>,
+    pub filter4: Option<FrameId>,
+    pub filter5: Option<FrameId>,
+}
+
+#[derive(Eq, PartialEq)]
+pub enum FiltersConfig {
+    ReceiveAll,
+    Filter(FiltersConfigBuffer0, Option<FiltersConfigBuffer1>)
 }
 
 impl<E, SPI, CS> MCP25625<SPI, CS>
@@ -813,29 +822,41 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
         self.write_reg_verify(CNF1::address(), cnf1)?;
         self.write_reg_verify(CNF2::address(), cnf2)?;
         self.write_reg_verify(CNF3::address(), cnf3)?;
-        Ok(())
-    }
-
-    pub fn masks_rxall(&mut self) -> Result<(), McpErrorKind> {
-        let mask_regs: [u8; 8] = [
-            0b0010_0000, 0b0010_0100,
-            0b0010_0001, 0b0010_0101,
-            0b0010_0010, 0b0010_0110,
-            0b0010_0011, 0b0010_0111
-        ];
-        for m in mask_regs.iter() {
-            self.write_reg_verify(*m, 0)?;
+        self.reset_error_flags();
+        self.reset_interrupt_flags(0);
+        match config.filters_config {
+            FiltersConfig::ReceiveAll => {
+                self.rx_configure(config.rollover_to_buffer1, true)?;
+            },
+            FiltersConfig::Filter(filters0, filters1) => {
+                self.rx_configure(config.rollover_to_buffer1, false)?;
+                self.configure_filters(filters0, filters1);
+            }
         }
+        self.change_mode(config.operation_mode)?;
         Ok(())
     }
 
-    pub fn rx_configure(&mut self, rollover: bool, debug_rx: bool) -> Result<(), McpErrorKind> {
+    // pub fn masks_rxall(&mut self) -> Result<(), McpErrorKind> {
+    //     let mask_regs: [u8; 8] = [
+    //         0b0010_0000, 0b0010_0100,
+    //         0b0010_0001, 0b0010_0101,
+    //         0b0010_0010, 0b0010_0110,
+    //         0b0010_0011, 0b0010_0111
+    //     ];
+    //     for m in mask_regs.iter() {
+    //         self.write_reg_verify(*m, 0)?;
+    //     }
+    //     Ok(())
+    // }
+
+    fn rx_configure(&mut self, rollover: bool, disable_filters: bool) -> Result<(), McpErrorKind> {
         let mut rxb0ctrl: u8 = 0;
         let mut rxb1ctrl: u8 = 0;
         if rollover {
             rxb0ctrl = rxb0ctrl | (1 << 2) | (1 << 1); // write to ro bit, so that verify succeeds
         }
-        if debug_rx {
+        if disable_filters {
             rxb0ctrl = rxb0ctrl | (0b11 << 5);
             rxb1ctrl = rxb1ctrl | (0b11 << 5);
         }
@@ -857,8 +878,8 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
         McpInterruptFlags { bits }
     }
 
-    pub fn enable_interrupts(&mut self) {
-        self.ral.write_reg(0x2B, 0xFF);
+    pub fn enable_interrupts(&mut self, sources: u8) {
+        self.ral.write_reg(0x2B, sources);
     }
 
     pub fn reset_interrupt_flags(&mut self, mask: u8) {
@@ -919,28 +940,22 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
         }
     }
 
-    pub fn send(&mut self, addr: CanAddress, data: &[u8], _: McpPriority) -> Result<(), McpErrorKind> {
-        if data.len() > 8 {
+    pub fn send(&mut self, frame: RawFrameRef, _: McpPriority) -> Result<(), McpErrorKind> {
+        if frame.data.len() > 8 {
             return Err(McpErrorKind::TooBig);
         }
         let buf = self.find_empty_txbuf()?;
-        let mut sidl: u8 = ((addr.address & 0b111) as u8) << 5;
-        if addr.is_extended() {
-            sidl = sidl | (1 << 3) | ((addr.address >> 27 & 0b11) as u8);
-        }
-        let eid8 = (addr.address >> 19 & 0xff) as u8;
-        let eid0 = (addr.address >> 11 & 0xff) as u8;
-        let sidh = (addr.address >> 3 & 0xff) as u8;
-        let dlc = data.len() as u8 & 0b1111;
+        let (sidh, sidl, eid8, eid0) = calculate_id_regs(frame.id);
+        let dlc = frame.data.len() as u8 & 0b1111;
         //let ctrl = (1 << 3) | ((priority as u8) & 0b11);
         let buf_config = [sidh, sidl, eid8, eid0, dlc];
-        self.ral.write_many2(buf.txb_sidh, &buf_config, data);
+        self.ral.write_many2(buf.txb_sidh, &buf_config, frame.data);
         self.ral.write_raw(&[buf.rts_cmd]);
         Ok(())
     }
 
     /// Read RX buffer and clear INTF flags automatically on cs pin raise
-    pub fn receive(&mut self, buffer: McpReceiveBuffer) -> McpCanMessage {
+    pub fn receive(&mut self, buffer: McpReceiveBuffer) -> RawFrame {
         let block_start_addr = match buffer {
             McpReceiveBuffer::Buffer0 => McpFastRxRead::RXB0SIDH, // sidh addr
             McpReceiveBuffer::Buffer1 => McpFastRxRead::RXB1SIDH
@@ -954,10 +969,11 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
         let dlc = buf[4];
 
         let is_extended = sidl & (1 << 3) != 0;
-        let address = if is_extended {
-            CanAddress::extended((((sidl & 0b11) as u32) << 27) | ((eid8 as u32) << 19) | ((eid0 as u32) << 11) | ((sidh as u32) << 3) | ((sidl >> 5) as u32))
+        let frame_id = if is_extended {
+            let address = ((sidh as u32) << 21) | ((sidl as u32 & 0xE0) << 13) | (((sidl & 0b11) as u32) << 16) | ((eid8 as u32) << 8) | eid0 as u32;
+            FrameId::Extended(unsafe { ExtendedId::new_unchecked(address) })
         } else {
-            CanAddress::standard((sidh as u16) | ((sidl >> 5) as u16))
+            FrameId::Standard(unsafe { StandardId::new_unchecked(((sidh as u16) << 3) | ((sidl >> 5) as u16)) })
         };
 
         let mut data = [0u8; 8];
@@ -966,12 +982,82 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
         if data_len > 8 {
             data_len = 8;
         }
-        McpCanMessage {
-            len: data_len,
+        RawFrame {
+            id: frame_id,
             data,
-            address,
-            filter: McpAcceptanceFilter::RXF0
+            len: data_len
         }
+    }
+
+    fn configure_filters(&mut self, filters0: FiltersConfigBuffer0, filters1: Option<FiltersConfigBuffer1>) {
+        self.mask(FilterMask::FilterMaskBuffer0, filters0.mask);
+        self.filter(Filter::Filter0, filters0.filter0);
+        let buffer0filter1 = match filters0.filter1 {
+            Some(filter1) => filter1,
+            None => filters0.filter0
+        };
+        self.filter(Filter::Filter1, buffer0filter1);
+        match filters1 {
+            Some(filters1) => {
+                self.mask(FilterMask::FilterMaskBuffer1, filters1.mask);
+                self.filter(Filter::Filter2, filters1.filter2);
+                let buffer1filter3 = match filters1.filter3 {
+                    Some(filter3) => filter3,
+                    None => filters1.filter2
+                };
+                self.filter(Filter::Filter3, buffer1filter3);
+                match filters1.filter4 {
+                    Some(filter4) => {
+                        self.filter(Filter::Filter4, filter4);
+                    },
+                    None => {
+                        self.filter(Filter::Filter4, buffer1filter3);
+                    }
+                }
+                match filters1.filter5 {
+                    Some(filter5) => {
+                        self.filter(Filter::Filter5, filter5);
+                    },
+                    None => {
+                        self.filter(Filter::Filter5, buffer1filter3);
+                    }
+                }
+            },
+            None => {
+                self.mask(FilterMask::FilterMaskBuffer1, filters0.mask);
+                self.filter(Filter::Filter2, filters0.filter0);
+                self.filter(Filter::Filter3, buffer0filter1);
+                self.filter(Filter::Filter4, buffer0filter1);
+                self.filter(Filter::Filter5, buffer0filter1);
+            }
+        }
+    }
+
+    fn filter(&mut self, filter: Filter, id: FrameId) {
+        let (sidh, sidl, eid8, eid0) = calculate_id_regs(id);
+        use Filter::*;
+        let base_address = match filter {
+            Filter0 | Filter1 | Filter2 => {
+                0x00 + (filter as u8) * 4
+            },
+            Filter3 | Filter4 | Filter5 => {
+                0x10 + (filter as u8 - 3) * 4
+            }
+        };
+        self.ral.write_many2(base_address, &[sidh, sidl, eid8, eid0], &[]);
+    }
+
+    fn mask(&mut self, mask_for: FilterMask, mask: u32) {
+        let (sidh, sidl, eid8, eid0) = calculate_mask_regs(mask);
+        let base_address = match mask_for {
+            FilterMask::FilterMaskBuffer0 => {
+                0x20
+            },
+            FilterMask::FilterMaskBuffer1 => {
+                0x24
+            }
+        };
+        self.ral.write_many2(base_address, &[sidh, sidl, eid8, eid0], &[]);
     }
 
     pub fn led_on(&mut self) {
@@ -986,5 +1072,27 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
             .b0fm().output()
             .b0fs().low()
             .b0fe().enable() );
+    }
+}
+
+// SIDH, SIDL (withoud EXIDE set), EID8, EID0
+fn calculate_mask_regs(mask: u32) -> (u8, u8, u8, u8) {
+    (
+        (mask >> 21) as u8,
+        (((mask >> 13) & 0xE0) as u8) | (((mask >> 16) & 0b11) as u8),
+        ((mask >> 8) & 0xFF) as u8,
+        (mask & 0xFF) as u8
+    )
+}
+// SIDH, SIDL (EXIDE depends on FrameId), EID8, EID0
+fn calculate_id_regs(id: FrameId) -> (u8, u8, u8, u8) {
+    match id {
+        FrameId::Standard(sid) => {
+            ((sid.id() >> 3) as u8, ((sid.id() as u8 & 0b111) << 5), 0u8, 0u8)
+        },
+        FrameId::Extended(eid) => {
+            let mask_regs = calculate_mask_regs(eid.id());
+            (mask_regs.0, mask_regs.1 | (1 << 3), mask_regs.2, mask_regs.3)
+        }
     }
 }
