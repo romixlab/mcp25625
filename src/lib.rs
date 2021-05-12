@@ -720,14 +720,14 @@ impl fmt::Debug for McpCanMessage {
 
 #[derive(Eq, PartialEq)]
 pub struct FiltersConfigBuffer0 {
-    pub mask: u32,
+    pub mask: FiltersMask,
     pub filter0: FrameId,
     pub filter1: Option<FrameId>
 }
 
 #[derive(Eq, PartialEq)]
 pub struct FiltersConfigBuffer1 {
-    pub mask: u32,
+    pub mask: FiltersMask,
     pub filter2: FrameId,
     pub filter3: Option<FrameId>,
     pub filter4: Option<FrameId>,
@@ -738,6 +738,32 @@ pub struct FiltersConfigBuffer1 {
 pub enum FiltersConfig {
     ReceiveAll,
     Filter(FiltersConfigBuffer0, Option<FiltersConfigBuffer1>)
+}
+
+#[derive(Eq, PartialEq)]
+pub enum FiltersMask {
+    /// All 29 bits are checked by filters (including 2 first bytes in case of a standard id).
+    AllExtendedIdBits,
+    /// Only 11 bits are checked by filters (usefull for standard id's).
+    OnlyStandardIdBits,
+    /// All 11 bits + 2 specified data bytes are checked by filters (EID17 and EID16 is ignored).
+    StandardIdBitsAndDataBytes01(u8, u8),
+    /// ID10 ID0 EID17 EID0 or ID10 ID0 . . EID15:EID8=byte0, EID7:EID0=byte1.
+    Custom(u32)
+}
+
+impl FiltersMask {
+    fn mask_bits(&self) -> u32 {
+        use FiltersMask::*;
+        match self {
+            AllExtendedIdBits => vhrdcan::EXTENDED_ID_ALL_BITS,
+            OnlyStandardIdBits => (vhrdcan::STANDARD_ID_ALL_BITS as u32) << 18,
+            StandardIdBitsAndDataBytes01(byte0, byte1) => {
+                (vhrdcan::STANDARD_ID_ALL_BITS as u32) << 18 | (*byte0 as u32) << 8 | (*byte1 as u32)
+            },
+            Custom(mask) => *mask
+        }
+    }
 }
 
 impl<E, SPI, CS> MCP25625<SPI, CS>
@@ -990,7 +1016,7 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
     }
 
     fn configure_filters(&mut self, filters0: FiltersConfigBuffer0, filters1: Option<FiltersConfigBuffer1>) {
-        self.mask(FilterMask::FilterMaskBuffer0, filters0.mask);
+        self.mask(FilterMask::FilterMaskBuffer0, filters0.mask.mask_bits());
         self.filter(Filter::Filter0, filters0.filter0);
         let buffer0filter1 = match filters0.filter1 {
             Some(filter1) => filter1,
@@ -999,7 +1025,7 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
         self.filter(Filter::Filter1, buffer0filter1);
         match filters1 {
             Some(filters1) => {
-                self.mask(FilterMask::FilterMaskBuffer1, filters1.mask);
+                self.mask(FilterMask::FilterMaskBuffer1, filters1.mask.mask_bits());
                 self.filter(Filter::Filter2, filters1.filter2);
                 let buffer1filter3 = match filters1.filter3 {
                     Some(filter3) => filter3,
@@ -1024,7 +1050,7 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
                 }
             },
             None => {
-                self.mask(FilterMask::FilterMaskBuffer1, filters0.mask);
+                self.mask(FilterMask::FilterMaskBuffer1, filters0.mask.mask_bits());
                 self.filter(Filter::Filter2, filters0.filter0);
                 self.filter(Filter::Filter3, buffer0filter1);
                 self.filter(Filter::Filter4, buffer0filter1);
