@@ -382,6 +382,10 @@ impl<E, SPI, CS> Mcp25625Ral<SPI, CS>
         }
     }
 
+    pub fn release(self) -> (SPI, CS) {
+        (self.spi, self.cs)
+    }
+
     pub fn write_reg(&mut self, addr: u8, byte: u8) {
         self.cs.set_low().ok();
         let _ = self.spi.write(&[Self::WRITE_CMD, addr, byte]);
@@ -772,11 +776,14 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
         CS: OutputPin
 {
     pub fn new(spi: SPI, cs: CS, one_cp: u32) -> Self {
-        let mut ral = Mcp25625Ral::new(spi, cs, one_cp);
-        ral.write_raw(&[Mcp25625Ral::<SPI, CS>::RESET_CMD]);
+        let ral = Mcp25625Ral::new(spi, cs, one_cp);
         Self {
             ral
         }
+    }
+
+    pub fn release(self) -> (SPI, CS) {
+        self.ral.release()
     }
 
     pub fn stat(&mut self) -> (McpOperationMode, McpStatInterruptFlags) {
@@ -818,6 +825,7 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
     }
 
     pub fn apply_config(&mut self, config: MCP25625Config) -> Result<(), McpErrorKind> {
+        self.ral.write_raw(&[Mcp25625Ral::<SPI, CS>::RESET_CMD]);
         let sync_seg = 1u8;
         let tq_per_bit = sync_seg + config.prop_seg + config.ph_seg1 + config.ph_seg2;
         if !(tq_per_bit >= 5 && tq_per_bit <= 25) {
