@@ -526,7 +526,8 @@ pub enum McpErrorKind {
     ConfigRequestFailed,
     RegVerifyError(u8),
     NoTxSlotsAvailable,
-    TooBig
+    TooBig,
+    SpiIsBroken
 }
 
 /// Convert enum to bits
@@ -826,6 +827,8 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
 
     pub fn apply_config(&mut self, config: MCP25625Config) -> Result<(), McpErrorKind> {
         self.ral.write_raw(&[Mcp25625Ral::<SPI, CS>::RESET_CMD]);
+        self.write_reg_verify(0b0011_0110, 0b1010_0101).map_err(|_| McpErrorKind::SpiIsBroken)?;
+        
         let sync_seg = 1u8;
         let tq_per_bit = sync_seg + config.prop_seg + config.ph_seg1 + config.ph_seg2;
         if !(tq_per_bit >= 5 && tq_per_bit <= 25) {
