@@ -3,10 +3,11 @@ name = "mcp25625"
 version = "0.1.0"
 authors = ["Roman Isaikin <romix.lab@gmail.com>"]
 edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license = "MIT"
+repository = "https://github.com/romixlab/mcp25625"
+description = "MCP25625 and MCP2515 SPI-CANBus no_std driver"
 
 [dependencies]
 cortex-m = "0.6"
-embedded-hal = "0.2.3"
-vhrdcan = { path = "../vhrdcan" }
+embedded-hal = "0.2"
+vhrdcan = { version = "0.1.0" }

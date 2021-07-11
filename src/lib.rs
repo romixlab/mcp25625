@@ -776,7 +776,8 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
         SPI: Transfer<u8, Error = E> + Write<u8, Error = E>,
         CS: OutputPin
 {
-    pub fn new(spi: SPI, cs: CS, one_cp: u32) -> Self {
+    pub fn new(spi: SPI, cs: CS, spi_frequency_hz: u32, core_frequency_hz: u32) -> Self {
+        let one_cp = core_frequency_hz / spi_frequency_hz;
         let ral = Mcp25625Ral::new(spi, cs, one_cp);
         Self {
             ral
