@@ -7,6 +7,7 @@ use embedded_hal::blocking::spi::{Write, Transfer};
 use embedded_hal::digital::v2::OutputPin;
 use cortex_m::asm::delay;
 use vhrdcan::{id::{FrameId, StandardId, ExtendedId}, RawFrameRef, RawFrame};
+use core::array::IntoIter;
 
 /// Shows that register has `read` method.
 pub trait Readable {}
@@ -665,7 +666,7 @@ impl fmt::Debug for McpInterruptFlags {
 }
 
 struct McpTxBuf {
-    pub txb_ctrl: u8,
+    // pub txb_ctrl: u8,
     pub txb_sidh: u8,
     pub rts_cmd: u8
 }
@@ -771,6 +772,15 @@ impl FiltersMask {
     }
 }
 
+pub enum TxBufferChoice {
+    Any,
+    OnlyOne(u8)
+}
+
+pub const TXB0CTRL: u8 = 0b0011_0000;
+pub const TXB1CTRL: u8 = 0b0011_0000 + 16;
+pub const TXB2CTRL: u8 = 0b0011_0000 + 32;
+
 impl<E, SPI, CS> MCP25625<SPI, CS>
     where
         SPI: Transfer<u8, Error = E> + Write<u8, Error = E>,
@@ -829,7 +839,7 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
     pub fn apply_config(&mut self, config: MCP25625Config) -> Result<(), McpErrorKind> {
         self.ral.write_raw(&[Mcp25625Ral::<SPI, CS>::RESET_CMD]);
         self.write_reg_verify(0b0011_0110, 0b1010_0101).map_err(|_| McpErrorKind::SpiIsBroken)?;
-        
+
         let sync_seg = 1u8;
         let tq_per_bit = sync_seg + config.prop_seg + config.ph_seg1 + config.ph_seg2;
         if !(tq_per_bit >= 5 && tq_per_bit <= 25) {
@@ -952,19 +962,35 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
         }
     }
 
-    fn find_empty_txbuf(&mut self) -> Result<McpTxBuf, McpErrorKind> {
-        let txb_n_ctrl: [u8; 3] = [0b0011_0000, 0b0011_0000 + 16, 0b0011_0000 + 32];
+    fn find_empty_txbuf(&mut self, buffer_choice: TxBufferChoice) -> Result<McpTxBuf, McpErrorKind> {
+        let txb_n_ctrl: &[u8] = match buffer_choice {
+            TxBufferChoice::Any => {
+                &[TXB0CTRL, TXB1CTRL, TXB2CTRL]
+            },
+            TxBufferChoice::OnlyOne(buffer_idx) => {
+                match buffer_idx {
+                    0 => { &[TXB0CTRL] }
+                    1 => { &[TXB1CTRL] }
+                    2 => { &[TXB2CTRL] }
+                    _ => { return Err(McpErrorKind::NoTxSlotsAvailable) }
+                }
+            }
+        };
+        // let txb_n_ctrl: [u8; 3] = [0b0011_0000, 0b0011_0000 + 16, 0b0011_0000 + 32];
         let mut buf_idx = 666;
         for (i, txb_n_ctrl_addr) in txb_n_ctrl.iter().enumerate() {
             let txb_ctrl = self.read_reg(*txb_n_ctrl_addr);
             if txb_ctrl & (1 << 3) == 0 {
-                buf_idx = i;
+                buf_idx = match buffer_choice {
+                    TxBufferChoice::Any => i,
+                    TxBufferChoice::OnlyOne(preferred) => preferred as usize
+                };
                 break;
             }
         }
         if buf_idx <= 2 {
             Ok(McpTxBuf{
-                txb_ctrl: txb_n_ctrl[buf_idx],
+                // txb_ctrl: txb_n_ctrl[buf_idx],
                 txb_sidh: txb_n_ctrl[buf_idx] + 1,
                 rts_cmd: Mcp25625Ral::<SPI, CS>::RTS_CMD | (1u8 << buf_idx as u8)
                 //txb_sidl: 0x32 + buf_idx as u8 * 0x10,
@@ -978,11 +1004,11 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
         }
     }
 
-    pub fn send(&mut self, frame: RawFrameRef, _: McpPriority) -> Result<(), McpErrorKind> {
+    pub fn send(&mut self, frame: RawFrameRef, buffer_choice: TxBufferChoice, _: McpPriority) -> Result<(), McpErrorKind> {
         if frame.data.len() > 8 {
             return Err(McpErrorKind::TooBig);
         }
-        let buf = self.find_empty_txbuf()?;
+        let buf = self.find_empty_txbuf(buffer_choice)?;
         let (sidh, sidl, eid8, eid0) = calculate_id_regs(frame.id);
         let dlc = frame.data.len() as u8 & 0b1111;
         //let ctrl = (1 << 3) | ((priority as u8) & 0b11);
