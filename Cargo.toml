@@ -10,4 +10,4 @@ description = "MCP25625 and MCP2515 SPI-CANBus no_std driver"
 [dependencies]
 cortex-m = "0.6"
 embedded-hal = "0.2"
-vhrdcan = { version = "0.1.0" }
+vhrdcan = {path = "../vhrdcan" }

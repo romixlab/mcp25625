@@ -6,8 +6,7 @@ use core::fmt;
 use embedded_hal::blocking::spi::{Write, Transfer};
 use embedded_hal::digital::v2::OutputPin;
 use cortex_m::asm::delay;
-use vhrdcan::{id::{FrameId, StandardId, ExtendedId}, RawFrameRef, RawFrame};
-use core::array::IntoIter;
+use vhrdcan::{id::{FrameId, StandardId, ExtendedId}, frame::{Frame, FrameRef}};
 
 /// Shows that register has `read` method.
 pub trait Readable {}
@@ -777,6 +776,14 @@ pub enum TxBufferChoice {
     OnlyOne(u8)
 }
 
+pub enum ClkOutMode {
+    Disabled = 4,
+    SystemClock = 0,
+    SystemClockDiv2 = 1,
+    SystemClockDiv4 = 2,
+    SystemClockDiv8 = 3
+}
+
 pub const TXB0CTRL: u8 = 0b0011_0000;
 pub const TXB1CTRL: u8 = 0b0011_0000 + 16;
 pub const TXB2CTRL: u8 = 0b0011_0000 + 32;
@@ -826,7 +833,8 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
 
     pub fn change_mode(&mut self, to: McpOperationMode) -> Result<(), McpErrorKind> {
         if self.stat().0 != to {
-            self.ral.write_reg(CANCTRL::address(), to.bits() << 5); // request new mode
+            // self.ral.write_reg(CANCTRL::address(), to.bits() << 5); // request new mode
+            self.ral.bit_modify(CANCTRL::address(), 0b1110_0000, to.bits() << 5);
             if self.stat().0 != to { // check
                 return Err(McpErrorKind::ConfigRequestFailed);
             }
@@ -883,6 +891,21 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
         }
         self.change_mode(config.operation_mode)?;
         Ok(())
+    }
+
+    pub fn clkout_mode(&mut self, clkout_mode: ClkOutMode) {
+        match clkout_mode {
+            ClkOutMode::Disabled => {
+                self.ral.bit_modify(CANCTRL::address(), 0b0000_0100, 0);
+            }
+            _ => {
+                self.ral.bit_modify(CANCTRL::address(), 0b0000_0111, 0b0000_0100 | clkout_mode as u8);
+            }
+        }
+    }
+
+    pub fn one_shot_mode(&mut self, is_enabled: bool) {
+        self.ral.bit_modify(CANCTRL::address(), 0b0000_1000, (is_enabled as u8) << 3);
     }
 
     // pub fn masks_rxall(&mut self) -> Result<(), McpErrorKind> {
@@ -1004,7 +1027,7 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
         }
     }
 
-    pub fn send(&mut self, frame: RawFrameRef, buffer_choice: TxBufferChoice, _: McpPriority) -> Result<(), McpErrorKind> {
+    pub fn send(&mut self, frame: FrameRef, buffer_choice: TxBufferChoice, _: McpPriority) -> Result<(), McpErrorKind> {
         if frame.data.len() > 8 {
             return Err(McpErrorKind::TooBig);
         }
@@ -1019,7 +1042,7 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
     }
 
     /// Read RX buffer and clear INTF flags automatically on cs pin raise
-    pub fn receive(&mut self, buffer: McpReceiveBuffer) -> RawFrame {
+    pub fn receive(&mut self, buffer: McpReceiveBuffer) -> Frame<8> {
         let block_start_addr = match buffer {
             McpReceiveBuffer::Buffer0 => McpFastRxRead::RXB0SIDH, // sidh addr
             McpReceiveBuffer::Buffer1 => McpFastRxRead::RXB1SIDH
@@ -1046,10 +1069,8 @@ impl<E, SPI, CS> MCP25625<SPI, CS>
         if data_len > 8 {
             data_len = 8;
         }
-        RawFrame {
-            id: frame_id,
-            data,
-            len: data_len
+        unsafe {
+            Frame::new_move_unchecked(frame_id, data, data_len as u16)
         }
     }
 
