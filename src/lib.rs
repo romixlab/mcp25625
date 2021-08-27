@@ -1173,10 +1173,10 @@ fn calculate_mask_regs(mask: u32) -> (u8, u8, u8, u8) {
 fn calculate_id_regs(id: FrameId) -> (u8, u8, u8, u8) {
     match id {
         FrameId::Standard(sid) => {
-            ((sid.id() >> 3) as u8, ((sid.id() as u8 & 0b111) << 5), 0u8, 0u8)
+            ((sid.inner() >> 3) as u8, ((sid.inner() as u8 & 0b111) << 5), 0u8, 0u8)
         },
         FrameId::Extended(eid) => {
-            let mask_regs = calculate_mask_regs(eid.id());
+            let mask_regs = calculate_mask_regs(eid.inner());
             (mask_regs.0, mask_regs.1 | (1 << 3), mask_regs.2, mask_regs.3)
         }
     }
